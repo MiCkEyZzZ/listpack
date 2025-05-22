@@ -2,7 +2,7 @@
 name = "listpack"
 authors = ["Mikhail<mikhail.f.zhuravlev@gmail.com>"]
 description = "Listpack implementatin"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 repository = "https://github.com/MiCkEyZzZ/listpack"
 edition = "2021"
@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 criterion = "0.6.0"
+smallvec = "1.15.0"
 
 [dev-dependencies]
 criterion = { version = "0.6.0", features = ["async"] }

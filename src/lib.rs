@@ -64,28 +64,35 @@ impl Listpack {
 
     /// Insert a value at the back of the list.
     pub fn push_back(&mut self, value: &[u8]) -> usize {
-        let mut len_bytes = Vec::new();
+        let mut len_buf = [0u8; 10];
+        let mut i = 0;
         let mut v = value.len();
 
         while v >= VARINT_CONT_THRESHOLD {
-            len_bytes.push((v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK);
+            len_buf[i] = (v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK;
             v >>= 7;
+            i += 1;
         }
 
-        len_bytes.push((v as u8) & VARINT_VALUE_MASK);
+        len_buf[i] = (v as u8) & VARINT_VALUE_MASK;
+        i += 1;
 
+        let len_bytes = &len_buf[..i];
         let extra = len_bytes.len() + value.len();
         self.grow_and_center(extra);
 
-        let term_pos = self.tail - 1;
-        self.data[term_pos..term_pos + len_bytes.len()].copy_from_slice(&len_bytes);
+        // Write the data
+        let term_pos = self.tail - 1; // previous terminator position
+        self.data[term_pos..term_pos + len_bytes.len()].copy_from_slice(len_bytes);
         let vstart = term_pos + len_bytes.len();
         self.data[vstart..vstart + value.len()].copy_from_slice(value);
+
+        // Update terminator and pointers
         let new_term = vstart + value.len();
         self.data[new_term] = LP_EOF;
-
         self.tail = new_term + 1;
         self.num_entries += 1;
+
         1
     }
 
@@ -181,6 +188,7 @@ impl Listpack {
 
     /// Encodes a `usize` value as a variable-length integer
     /// (varint).
+    #[inline(always)]
     pub fn encode_variant(mut value: usize) -> Vec<u8> {
         let mut buf = Vec::new();
 
@@ -202,6 +210,7 @@ impl Listpack {
     /// Decodes a variable-length integer (varint) from the given
     /// slice. Returns the decoded value and the number of bytes
     /// consumed.
+    #[inline(always)]
     pub fn decode_varint(data: &[u8]) -> Option<(usize, usize)> {
         let mut result = 0usize;
         let mut shift = 0;
@@ -224,6 +233,7 @@ impl Listpack {
     /// Amortized expansion and centering of the internal buffer
     /// if needed. Ensures there is enough space to insert `extra`
     /// bytes.
+    #[inline(always)]
     fn grow_and_center(&mut self, extra: usize) {
         let used = self.tail - self.head;
         let need = used + extra + 1;
