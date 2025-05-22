@@ -2,7 +2,7 @@
 name = "listpack"
 authors = ["Mikhail<mikhail.f.zhuravlev@gmail.com>"]
 description = "Listpack implementatin"
-version = "0.2.0"
+version = "1.1.0"
 license = "MIT"
 repository = "https://github.com/MiCkEyZzZ/listpack"
 edition = "2021"

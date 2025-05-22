@@ -39,23 +39,27 @@ impl Listpack {
 
     /// Insert a value at the front of the list.
     pub fn push_front(&mut self, value: &[u8]) -> usize {
-        let mut len_bytes = Vec::new();
+        let mut len_buf = [0u8; 10];
+        let mut i = 0;
         let mut v = value.len();
 
         while v >= VARINT_CONT_THRESHOLD {
-            len_bytes.push((v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK);
+            len_buf[i] = (v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK;
             v >>= 7;
+            i += 1;
         }
 
-        len_bytes.push((v as u8) & VARINT_VALUE_MASK);
+        len_buf[i] = (v as u8) & VARINT_VALUE_MASK;
+        i += 1;
 
+        let len_bytes = &len_buf[..i];
         let extra = len_bytes.len() + value.len();
         self.grow_and_center(extra);
 
         // Move head backward and write len + value
         self.head -= extra;
         let h = self.head;
-        self.data[h..h + len_bytes.len()].copy_from_slice(&len_bytes);
+        self.data[h..h + len_bytes.len()].copy_from_slice(len_bytes);
         self.data[h + len_bytes.len()..h + extra].copy_from_slice(value);
 
         self.num_entries += 1;
