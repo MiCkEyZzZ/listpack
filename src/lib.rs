@@ -3,6 +3,17 @@
 //! This file implements the specification you can
 //! find at: https://github.com/MiCkEyZzZ/listpack
 
+/// Терминатор списка — байт 0xFF.
+const LP_EOF: u8 = 0xFF;
+/// Маска для младших 7 бит в varint-байте (payload).
+const VARINT_VALUE_MASK: u8 = 0x7F;
+/// Флаг «продолжение» в старшем бите varint-байта.
+const VARINT_CONT_MASK: u8 = 0x80;
+/// Максимальное значение, которое помещается в один varint-байт без continuation.
+const VARINT_VALUE_MAX: usize = VARINT_VALUE_MASK as usize;
+/// Порог, при достижении или превышении которого нужен следующий байт varint.
+const VARINT_CONT_THRESHOLD: usize = VARINT_VALUE_MAX + 1;
+
 pub struct Listpack {
     data: Vec<u8>,
     head: usize,
@@ -17,7 +28,7 @@ impl Listpack {
         let cap = 1024;
         let mut data = vec![0; cap];
         let head = cap / 2;
-        data[head] = 0xFF;
+        data[head] = LP_EOF;
         Self {
             data,
             head,
@@ -31,11 +42,12 @@ impl Listpack {
         let mut len_bytes = Vec::new();
         let mut v = value.len();
 
-        while v >= 0x80 {
-            len_bytes.push((v as u8 & 0x7F) | 0x80);
+        while v >= VARINT_CONT_THRESHOLD {
+            len_bytes.push((v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK);
             v >>= 7;
         }
-        len_bytes.push(v as u8);
+
+        len_bytes.push((v as u8) & VARINT_VALUE_MASK);
 
         let extra = len_bytes.len() + value.len();
         self.grow_and_center(extra);
@@ -55,11 +67,12 @@ impl Listpack {
         let mut len_bytes = Vec::new();
         let mut v = value.len();
 
-        while v >= 0x80 {
-            len_bytes.push((v as u8 & 0x7F) | 0x80);
+        while v >= VARINT_CONT_THRESHOLD {
+            len_bytes.push((v as u8 & VARINT_VALUE_MASK) | VARINT_CONT_MASK);
             v >>= 7;
         }
-        len_bytes.push(v as u8);
+
+        len_bytes.push((v as u8) & VARINT_VALUE_MASK);
 
         let extra = len_bytes.len() + value.len();
         self.grow_and_center(extra);
@@ -69,7 +82,7 @@ impl Listpack {
         let vstart = term_pos + len_bytes.len();
         self.data[vstart..vstart + value.len()].copy_from_slice(value);
         let new_term = vstart + value.len();
-        self.data[new_term] = 0xFF;
+        self.data[new_term] = LP_EOF;
 
         self.tail = new_term + 1;
         self.num_entries += 1;
@@ -91,10 +104,12 @@ impl Listpack {
         if index >= self.num_entries {
             return None;
         }
+
         let mut pos = self.head;
         let mut curr = 0;
+
         while pos < self.tail {
-            if self.data[pos] == 0xFF {
+            if self.data[pos] == LP_EOF {
                 break;
             }
             // decode varint from current position
@@ -105,6 +120,7 @@ impl Listpack {
             pos += consumed + len;
             curr += 1;
         }
+
         None
     }
 
@@ -115,7 +131,7 @@ impl Listpack {
         let end = self.tail;
 
         std::iter::from_fn(move || {
-            if pos >= end || data[pos] == 0xFF {
+            if pos >= end || data[pos] == LP_EOF {
                 return None;
             }
 
@@ -133,12 +149,14 @@ impl Listpack {
         if index >= self.num_entries {
             return 0;
         }
+
         let mut i = self.head;
         let mut curr = 0;
         while i < self.tail {
-            if self.data[i] == 0xFF {
+            if self.data[i] == LP_EOF {
                 break;
             }
+
             if let Some((len, consumed)) = Self::decode_varint(&self.data[i..]) {
                 if curr == index {
                     let start = i;
@@ -146,11 +164,12 @@ impl Listpack {
                     self.data.copy_within(end..self.tail, start);
                     self.tail -= end - start;
                     if self.tail > 0 {
-                        self.data[self.tail - 1] = 0xFF;
+                        self.data[self.tail - 1] = LP_EOF;
                     }
                     self.num_entries -= 1;
                     return 1;
                 }
+
                 i += consumed + len;
                 curr += 1;
             } else {
@@ -166,14 +185,14 @@ impl Listpack {
         let mut buf = Vec::new();
 
         loop {
-            let byte = (value & 0x7F) as u8; // take lowest 7 bits
+            let byte = (value & VARINT_VALUE_MAX) as u8; // take lowest 7 bits
             value >>= 7;
 
             if value == 0 {
                 buf.push(byte); // last byte: continuation bit is not set
                 break;
             } else {
-                buf.push(byte | 0x80); // Set continuation bit (more bytes follow)
+                buf.push(byte | VARINT_CONT_MASK); // Set continuation bit (more bytes follow)
             }
         }
 
@@ -187,15 +206,18 @@ impl Listpack {
         let mut result = 0usize;
         let mut shift = 0;
         for (i, &byte) in data.iter().enumerate() {
-            result |= ((byte & 0x7F) as usize) << shift;
-            if byte & 0x80 == 0 {
+            result |= ((byte & VARINT_VALUE_MASK) as usize) << shift;
+            if byte & VARINT_CONT_MASK == 0 {
                 return Some((result, i + 1));
             }
+
             shift += 7;
+
             if shift > std::mem::size_of::<usize>() * 8 {
                 return None;
             }
         }
+
         None
     }
 
