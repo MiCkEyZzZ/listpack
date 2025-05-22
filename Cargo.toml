@@ -1,11 +1,14 @@
 [package]
 name = "listpack"
-authors = ["Mikhail<mikhail.f.zhuravlev@gmail.com>"]
-description = "Listpack implementatin"
 version = "1.1.0"
-license = "MIT"
-repository = "https://github.com/MiCkEyZzZ/listpack"
+authors = ["Mikhail<mikhail.f.zhuravlev@gmail.com>"]
 edition = "2021"
+license = "MIT"
+description = "A compact, memory-efficient serialization format for lists of byte strings using varint-encoded lengths"
+repository = "https://github.com/MiCkEyZzZ/listpack"
+homepage = "https://github.com/MiCkEyZzZ/listpack#readme"
+readme = "README.md"
+categories = ["data-serialization", "data-structures"]
 publish = false
 
 [lib]
@@ -14,7 +17,6 @@ path = "src/lib.rs"
 
 [dependencies]
 criterion = "0.6.0"
-smallvec = "1.15.0"
 
 [dev-dependencies]
 criterion = { version = "0.6.0", features = ["async"] }

@@ -1,11 +1,20 @@
 # listpack
 
-In-memory listpack implementetion for Zumic
+In-memory Listpack implementation for the Zumic.
 
 > ⚠️ **Note:**
-> This crate is for internal use within the Zumic project.
-> If you need a publicly accessible listpack, consider third-party solutions
-> from crates.io.
+> This crate is intended for **internal use** within the Zumic codebase.
+> If you need a standalone or public-facing Listpack, please look for
+community-maintained crates on [crates.io](https://crates.io/).
+
+## Features
+
+- 🔹 **Compact storage** using varint-encoded lengths
+- 🔹 **Bidirectional insertions** (`push_front` and `push_back`)
+- 🔹 **Indexed access** (`get`)
+- 🔹 **Iterator support** for sequential traversal
+- 🔹 **In-place removal** of arbitrary entries
+- 🔹 **Benchmarks** via Criterion (see `bench/listpack_benchmarks.rs`)
 
 ## License
 
