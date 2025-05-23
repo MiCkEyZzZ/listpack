@@ -58,6 +58,7 @@ impl Listpack {
     /// # Arguments
     ///
     /// * `value` - A byte slice to insert at the front.
+    #[inline(always)]
     pub fn push_front(&mut self, value: &[u8]) -> usize {
         let mut len_buf = [0u8; 10];
         let mut i = 0;
@@ -93,6 +94,7 @@ impl Listpack {
     /// # Arguments
     ///
     /// * `value` - A byte slice to append.
+    #[inline(always)]
     pub fn push_back(&mut self, value: &[u8]) -> usize {
         let mut len_buf = [0u8; 10];
         let mut i = 0;
