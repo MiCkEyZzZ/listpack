@@ -1,11 +1,12 @@
-//! Listpack: a compact list of binary strings serialization format.
+//! Listpack: a compact list of binary strings serialization
+//! format.
 //!
 //! This module implements the specification found at:
 //! <https://github.com/MiCkEyZzZ/listpack>
 //!
-//! Internally, it stores a sequence of byte strings in a single contiguous
-//! buffer using variable-length integer (varint) encoding for lengths and
-//! a special terminator byte.
+//! Internally, it stores a sequence of byte strings in a single
+//! contiguous buffer using variable-length integer (varint)
+//! encoding for lengths and a special terminator byte.
 
 /// Terminator byte indicating the end of the list data.
 const LP_EOF: u8 = 0xFF;
@@ -16,16 +17,19 @@ const VARINT_VALUE_MASK: u8 = 0x7F;
 /// Continuation flag in the highest bit of a varint byte.
 const VARINT_CONT_MASK: u8 = 0x80;
 
-/// Maximum value that fits in a single varint byte without continuation.
+/// Maximum value that fits in a single varint byte without
+/// continuation.
 const VARINT_VALUE_MAX: usize = VARINT_VALUE_MASK as usize;
 
 /// Threshold at which a varint must use an additional byte.
 const VARINT_CONT_THRESHOLD: usize = VARINT_VALUE_MAX + 1;
 
-/// A memory-efficient list of byte strings using custom varint-based serialization.
+/// A memory-efficient list of byte strings using custom
+/// varint-based serialization.
 ///
-/// The underlying storage is a `Vec<u8>` centered around a terminator byte.
-/// Each entry is stored as a varint-encoded length followed by the raw bytes.
+/// The underlying storage is a `Vec<u8>` centered around a
+/// terminator byte. Each entry is stored as a varint-encoded
+/// length followed by the raw bytes.
 pub struct Listpack {
     data: Vec<u8>,
     head: usize,
@@ -43,8 +47,8 @@ pub struct ListpackIter<'a> {
 impl Listpack {
     /// Creates a new empty `Listpack` with a preallocated buffer.
     ///
-    /// The internal buffer of size 1024 is centered with the terminator byte
-    /// placed at the midpoint.
+    /// The internal buffer of size 1024 is centered with the
+    /// terminator byte placed at the midpoint.
     pub fn new() -> Self {
         let cap = 1024;
         let mut data = vec![0; cap];
@@ -60,13 +64,13 @@ impl Listpack {
 
     /// Inserts a value at the front of the list.
     ///
-    /// Returns `1` on success.
+    /// Returns `true` on success.
     ///
     /// # Arguments
     ///
     /// * `value` - A byte slice to insert at the front.
     #[inline(always)]
-    pub fn push_front(&mut self, value: &[u8]) -> usize {
+    pub fn push_front(&mut self, value: &[u8]) -> bool {
         let mut len_buf = [0u8; 10];
         let mut i = 0;
         let mut v = value.len();
@@ -91,18 +95,19 @@ impl Listpack {
         self.data[h + len_bytes.len()..h + extra].copy_from_slice(value);
 
         self.num_entries += 1;
-        1
+
+        true
     }
 
     /// Inserts a value at the back of the list.
     ///
-    /// Returns `1` on success.
+    /// Returns `true` on success.
     ///
     /// # Arguments
     ///
     /// * `value` - A byte slice to append.
     #[inline(always)]
-    pub fn push_back(&mut self, value: &[u8]) -> usize {
+    pub fn push_back(&mut self, value: &[u8]) -> bool {
         let mut len_buf = [0u8; 10];
         let mut i = 0;
         let mut v = value.len();
@@ -131,7 +136,66 @@ impl Listpack {
         self.tail = new_term + 1;
         self.num_entries += 1;
 
-        1
+        true
+    }
+
+    /// Remove and returns the first element, or `None` if empty.
+    #[inline(always)]
+    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
+        if self.num_entries == 0 {
+            return None;
+        }
+
+        let (len, consumed) = Self::decode_varint(&self.data[self.head..])?;
+        let start = self.head + consumed;
+        let slice = self.data[start..start + len].to_vec();
+        let total = consumed + len;
+        let new_head = self.head + total;
+        self.head = new_head;
+        self.num_entries -= 1;
+
+        Some(slice)
+    }
+
+    /// Removes and returns the last element, or `None` if empty.
+    #[inline(always)]
+    pub fn pop_back(&mut self) -> Option<Vec<u8>> {
+        if self.num_entries == 0 {
+            return None;
+        }
+
+        let mut pos = self.head;
+        let mut last_pos = self.head;
+        let mut last_header = 0;
+
+        while pos < self.tail {
+            if self.data[pos] == LP_EOF {
+                break;
+            }
+
+            last_pos = pos;
+
+            if let Some((len, header)) = Self::decode_varint(&self.data[pos..]) {
+                last_header = header;
+                pos += header + len;
+            } else {
+                return None;
+            }
+        }
+
+        let (len, _) = Self::decode_varint(&self.data[last_pos..]).unwrap();
+        let start = last_pos + last_header;
+        let slice = self.data[start..start + len].to_vec();
+        let end = start + len;
+
+        self.data.copy_within(end..self.tail, last_pos);
+        self.tail -= end - last_pos;
+        if self.tail > 0 {
+            self.data[self.tail - 1] = LP_EOF;
+        }
+        self.num_entries -= 1;
+
+        Some(slice)
     }
 
     /// Returns the number of entries in the list.
@@ -144,7 +208,83 @@ impl Listpack {
         self.num_entries == 0
     }
 
-    /// Retrieves a reference to the element at the specified index, if present.
+    /// Clears all entries, resetting to initial state.
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        let cap = self.data.len();
+        self.head = cap / 2;
+        self.tail = self.head + 1;
+        self.data[self.head] = LP_EOF;
+        self.num_entries = 0;
+    }
+
+    /// Ensures capacity for at least `additional` more bytes
+    /// without realloc.
+    #[inline(always)]
+    pub fn reserve(&mut self, additional: usize) {
+        let need = (10 + additional) + (self.tail - self.head) + 1;
+
+        if need > self.data.len() {
+            self.grow_and_center(need - (self.tail - self.head));
+        }
+    }
+
+    /// Replaces the element at `index` with `value`, if lengths
+    /// allow.
+    ///
+    /// Returns `true` on success, `false` if `value.len()` > old_len.
+    #[inline(always)]
+    pub fn replace(&mut self, index: usize, value: &[u8]) -> bool {
+        if index >= self.num_entries {
+            return false;
+        }
+
+        let mut pos = self.head;
+        let mut curr = 0;
+
+        while pos < self.tail {
+            if self.data[pos] == LP_EOF {
+                break;
+            }
+
+            let (old_len, old_header) = match Self::decode_varint(&self.data[pos..]) {
+                Some(x) => x,
+                None => return false,
+            };
+
+            if curr == index {
+                let new_header_bytes = Self::encode_variant(value.len());
+
+                if new_header_bytes.len() != old_header || value.len() > old_len {
+                    return false;
+                }
+
+                self.data[pos..pos + old_header].copy_from_slice(&new_header_bytes);
+                let data_start = pos + old_header;
+
+                self.data[data_start..data_start + value.len()].copy_from_slice(value);
+
+                let src = data_start + old_len;
+                let dst = data_start + value.len();
+                self.data.copy_within(src..self.tail, dst);
+                self.tail -= old_len - value.len();
+
+                if self.tail > 0 {
+                    self.data[self.tail - 1] = LP_EOF;
+                }
+
+                return true;
+            }
+
+            pos += old_header + old_len;
+            curr += 1;
+        }
+
+        false
+    }
+
+    /// Retrieves a reference to the element at the specified index,
+    /// if present.
     ///
     /// # Arguments
     ///
@@ -184,18 +324,21 @@ impl Listpack {
 
     /// Removes the element at the specified index.
     ///
-    /// Returns `1` if removal was successful, or `0` if index was out of bounds.
+    /// Returns `true` if removal was successful, or `false` if index was out
+    /// of bounds.
     ///
     /// # Arguments
     ///
     /// * `index` - Zero-based position to remove.
     #[inline(always)]
-    pub fn remove(&mut self, index: usize) -> usize {
+    pub fn remove(&mut self, index: usize) -> bool {
         if index >= self.num_entries {
-            return 0;
+            return false;
         }
+
         let mut i = self.head;
         let mut curr = 0;
+
         while i < self.tail && self.data[i] != LP_EOF {
             if let Some((len, consumed)) = Self::decode_varint(&self.data[i..]) {
                 if curr == index {
@@ -207,7 +350,8 @@ impl Listpack {
                         self.data[self.tail - 1] = LP_EOF;
                     }
                     self.num_entries -= 1;
-                    return 1;
+
+                    return true;
                 }
                 i += consumed + len;
                 curr += 1;
@@ -215,7 +359,8 @@ impl Listpack {
                 break;
             }
         }
-        0
+
+        false
     }
 
     /// Encodes a usize value as a varint (variable-length integer).
@@ -311,7 +456,34 @@ impl<'a> Iterator for ListpackIter<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
+        (self.end - self.pos, Some(self.end - self.pos))
+    }
+}
+
+impl<'a> ExactSizeIterator for ListpackIter<'a> {}
+impl<'a> DoubleEndedIterator for ListpackIter<'a> {
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+
+        let mut i = self.end - 2;
+
+        while i > 0 && (self.data[i] & VARINT_CONT_MASK) != 0 {
+            i -= 1;
+        }
+
+        let (len, consumed) = match Listpack::decode_varint(&self.data[i..self.end]) {
+            Some(x) => x,
+            None => return None,
+        };
+
+        let start = i + consumed;
+        let slice = &self.data[start..start + len];
+        self.end = i;
+
+        Some(slice)
     }
 }
 
@@ -373,7 +545,7 @@ mod tests {
         lp.push_back(b"b");
         lp.push_back(b"c");
 
-        assert_eq!(lp.remove(1), 1);
+        assert_eq!(lp.remove(1), true);
         assert_eq!(lp.len(), 2);
         assert_eq!(lp.get(0), Some(&b"a"[..]));
         assert_eq!(lp.get(1), Some(&b"c"[..]));
@@ -386,7 +558,7 @@ mod tests {
         lp.push_back(b"x");
         lp.push_back(b"y");
 
-        assert_eq!(lp.remove(0), 1);
+        assert_eq!(lp.remove(0), true);
         assert_eq!(lp.get(0), Some(&b"y"[..]));
     }
 
@@ -396,7 +568,7 @@ mod tests {
         let mut lp = Listpack::new();
         lp.push_back(b"a");
 
-        assert_eq!(lp.remove(5), 0);
+        assert_eq!(lp.remove(5), false);
         assert_eq!(lp.len(), 1);
     }
 
@@ -437,7 +609,7 @@ mod tests {
         assert_eq!(lp.get(0), None);
 
         let mut lp2 = Listpack::new();
-        assert_eq!(lp2.remove(0), 0);
+        assert_eq!(lp2.remove(0), false);
     }
 
     /// Tests zero-length entries (empty byte slices).
@@ -508,7 +680,7 @@ mod tests {
 
         lp.push_back(b"end");
 
-        assert_eq!(lp.remove(0), 1);
+        assert_eq!(lp.remove(0), true);
         assert!(lp.is_empty());
 
         lp.push_front(b"new");
@@ -560,5 +732,58 @@ mod tests {
         assert_eq!(lp.get(1), Some(format!("F4998").as_bytes()));
         assert_eq!(lp.get(5000), Some(format!("B0").as_bytes()));
         assert_eq!(lp.get(9_999), Some(format!("B4999").as_bytes()));
+    }
+
+    #[test]
+    fn test_pop_front_and_pop_back() {
+        let mut lp = Listpack::new();
+
+        lp.push_back(b"a");
+        lp.push_back(b"b");
+        lp.push_back(b"c");
+
+        assert_eq!(lp.pop_front(), Some(b"a".to_vec()));
+        assert_eq!(lp.len(), 2);
+        assert_eq!(lp.pop_back(), Some(b"c".to_vec()));
+        assert_eq!(lp.len(), 1);
+        assert_eq!(lp.pop_front(), Some(b"b".to_vec()));
+        assert!(lp.is_empty());
+        assert_eq!(lp.pop_back(), None);
+    }
+
+    #[test]
+    fn test_clear_and_reserve() {
+        let mut lp = Listpack::new();
+
+        for &v in &[b"x", b"y", b"z"] {
+            lp.push_back(v);
+        }
+
+        lp.clear();
+        assert!(lp.is_empty());
+        // reserve should not panic and should allocate enough
+        lp.reserve(5000);
+
+        for _ in 0..5000 {
+            lp.push_back(b"v");
+        }
+
+        assert_eq!(lp.len(), 5000);
+    }
+
+    #[test]
+    fn test_replace() {
+        let mut lp = Listpack::new();
+
+        lp.push_back(b"foo");
+        lp.push_back(b"barbaz");
+
+        // narrower replacement allowed
+        assert!(lp.replace(1, b"hi"));
+        assert_eq!(lp.get(1), Some(&b"hi"[..]));
+
+        // too long replacement denied
+        assert!(!lp.replace(0, b"toolong"));
+        assert_eq!(lp.get(0), Some(&b"foo"[..]));
     }
 }
