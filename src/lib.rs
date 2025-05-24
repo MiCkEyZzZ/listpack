@@ -311,7 +311,6 @@ impl<'a> Iterator for ListpackIter<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        // Можно оценить оставшиеся записи, но оставить по умолчанию
         (0, None)
     }
 }
