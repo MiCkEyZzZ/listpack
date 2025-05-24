@@ -33,6 +33,13 @@ pub struct Listpack {
     num_entries: usize,
 }
 
+/// Iterator over a `Listpack`
+pub struct ListpackIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+    end: usize,
+}
+
 impl Listpack {
     /// Creates a new empty `Listpack` with a preallocated buffer.
     ///
@@ -151,15 +158,13 @@ impl Listpack {
         let mut pos = self.head;
         let mut curr = 0;
 
-        while pos < self.tail {
-            if self.data[pos] == LP_EOF {
-                break;
-            }
-            // decode varint from current position
+        while pos < self.tail && self.data[pos] != LP_EOF {
             let (len, consumed) = Self::decode_varint(&self.data[pos..])?;
+
             if curr == index {
                 return Some(&self.data[pos + consumed..pos + consumed + len]);
             }
+
             pos += consumed + len;
             curr += 1;
         }
@@ -167,24 +172,14 @@ impl Listpack {
         None
     }
 
-    /// Returns an iterator over all elements in the list, from front to back.
+    /// Returns a `ListpackIter` for efficient forward iteration.
     #[inline(always)]
-    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
-        let data = &self.data;
-        let mut pos = self.head;
-        let end = self.tail;
-
-        std::iter::from_fn(move || {
-            if pos >= end || data[pos] == LP_EOF {
-                return None;
-            }
-
-            let (len, consumed) = Self::decode_varint(&data[pos..])?;
-            let start = pos + consumed;
-            let slice = &data[start..start + len];
-            pos = start + len;
-            Some(slice)
-        })
+    pub fn iter(&self) -> ListpackIter<'_> {
+        ListpackIter {
+            data: &self.data,
+            pos: self.head,
+            end: self.tail,
+        }
     }
 
     /// Removes the element at the specified index.
@@ -199,14 +194,9 @@ impl Listpack {
         if index >= self.num_entries {
             return 0;
         }
-
         let mut i = self.head;
         let mut curr = 0;
-        while i < self.tail {
-            if self.data[i] == LP_EOF {
-                break;
-            }
-
+        while i < self.tail && self.data[i] != LP_EOF {
             if let Some((len, consumed)) = Self::decode_varint(&self.data[i..]) {
                 if curr == index {
                     let start = i;
@@ -219,7 +209,6 @@ impl Listpack {
                     self.num_entries -= 1;
                     return 1;
                 }
-
                 i += consumed + len;
                 curr += 1;
             } else {
@@ -259,6 +248,7 @@ impl Listpack {
     pub fn decode_varint(data: &[u8]) -> Option<(usize, usize)> {
         let mut result = 0usize;
         let mut shift = 0;
+
         for (i, &byte) in data.iter().enumerate() {
             result |= ((byte & VARINT_VALUE_MASK) as usize) << shift;
             if byte & VARINT_CONT_MASK == 0 {
@@ -301,6 +291,28 @@ impl Listpack {
 impl Default for Listpack {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<'a> Iterator for ListpackIter<'a> {
+    type Item = &'a [u8];
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end || self.data[self.pos] == LP_EOF {
+            return None;
+        }
+
+        let (len, consumed) = Listpack::decode_varint(&self.data[self.pos..])?;
+        let start = self.pos + consumed;
+        let slice = &self.data[start..start + len];
+        self.pos = start + len;
+        Some(slice)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // Можно оценить оставшиеся записи, но оставить по умолчанию
+        (0, None)
     }
 }
 
