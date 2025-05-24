@@ -15,6 +15,66 @@ fn bench_push_back(c: &mut Criterion) {
     });
 }
 
+fn bench_extend_back(c: &mut Criterion) {
+    let data = vec![b"abc".as_ref(); 1000];
+    c.bench_function("extend_back 1000 elements", |b| {
+        b.iter(|| {
+            let mut lp = Listpack::new();
+            lp.extend_back(black_box(data.clone())).unwrap();
+        });
+    });
+}
+
+fn bench_extend_front(c: &mut Criterion) {
+    let data = vec![b"abc".as_ref(); 1000];
+    c.bench_function("extend_front 1000 elements", |b| {
+        b.iter(|| {
+            let mut lp = Listpack::new();
+            lp.extend_front(black_box(data.clone())).unwrap();
+        });
+    });
+}
+
+fn bench_push_back_with_reserve(c: &mut Criterion) {
+    c.bench_function("push_back with reserve (1000)", |b| {
+        b.iter(|| {
+            let mut lp = Listpack::new();
+            lp.reserve(1000 * 4); // запас с учётом среднего размера
+            for _ in 0..1000 {
+                lp.push_back(black_box(b"abc"));
+            }
+        });
+    });
+}
+
+fn bench_replace_grow(c: &mut Criterion) {
+    c.bench_function("replace 100 elements (grow)", |b| {
+        b.iter(|| {
+            let mut lp = Listpack::new();
+            for _ in 0..1000 {
+                lp.push_back(b"abc");
+            }
+            for i in (0..100).map(|x| x * 10) {
+                black_box(lp.replace(i, b"abcdef")); // больше
+            }
+        });
+    });
+}
+
+fn bench_replace_shrink(c: &mut Criterion) {
+    c.bench_function("replace 100 elements (shrink)", |b| {
+        b.iter(|| {
+            let mut lp = Listpack::new();
+            for _ in 0..1000 {
+                lp.push_back(b"abcdef");
+            }
+            for i in (0..100).map(|x| x * 10) {
+                black_box(lp.replace(i, b"abc")); // меньше
+            }
+        });
+    });
+}
+
 fn bench_push_front(c: &mut Criterion) {
     c.bench_function("push_front 1000 small elements", |b| {
         b.iter(|| {
@@ -122,5 +182,10 @@ criterion_group!(
     bench_get_random,
     bench_remove,
     bench_replace_same_size,
+    bench_replace_grow,
+    bench_replace_shrink,
+    bench_extend_back,
+    bench_extend_front,
+    bench_push_back_with_reserve,
 );
 criterion_main!(benches);

@@ -8,6 +8,8 @@
 //! contiguous buffer using variable-length integer (varint)
 //! encoding for lengths and a special terminator byte.
 
+use std::result::Result;
+
 /// Terminator byte indicating the end of the list data.
 const LP_EOF: u8 = 0xFF;
 
@@ -53,6 +55,27 @@ impl Listpack {
         let cap = 1024;
         let mut data = vec![0; cap];
         let head = cap / 2;
+        data[head] = LP_EOF;
+        Self {
+            data,
+            head,
+            tail: head + 1,
+            num_entries: 0,
+        }
+    }
+
+    /// Creates a new `Listpack` with a preallocated buffer of the given capacity.
+    ///
+    /// The internal buffer is centered with the terminator byte placed at the midpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The initial capacity of the internal buffer.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(2); // минимум 2 байта, чтобы был хотя бы EOF
+        let mut data = Vec::with_capacity(capacity);
+        data.resize(capacity, 0);
+        let head = capacity / 2;
         data[head] = LP_EOF;
         Self {
             data,
@@ -218,6 +241,27 @@ impl Listpack {
         self.num_entries = 0;
     }
 
+    /// Returns the current capacity of the internal buffer.
+    pub fn capacity(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns a reference to the first element, or `None` if empty.
+    #[must_use]
+    pub fn front(&self) -> Option<&[u8]> {
+        self.get(0)
+    }
+
+    /// Returns a reference to the last element, or `None` if empty.
+    #[must_use]
+    pub fn back(&self) -> Option<&[u8]> {
+        if self.num_entries == 0 {
+            None
+        } else {
+            self.get(self.num_entries - 1)
+        }
+    }
+
     /// Ensures capacity for at least `additional` more bytes
     /// without realloc.
     #[inline(always)]
@@ -253,7 +297,7 @@ impl Listpack {
             };
 
             if curr == index {
-                let new_header_bytes = Self::encode_variant(value.len());
+                let new_header_bytes = Self::encode_varint(value.len());
 
                 if new_header_bytes.len() != old_header || value.len() > old_len {
                     return false;
@@ -367,7 +411,7 @@ impl Listpack {
     ///
     /// Returns a `Vec<u8>` containing the varint bytes.
     #[inline(always)]
-    pub fn encode_variant(mut value: usize) -> Vec<u8> {
+    pub fn encode_varint(mut value: usize) -> Vec<u8> {
         let mut buf = Vec::new();
 
         loop {
@@ -410,6 +454,36 @@ impl Listpack {
         None
     }
 
+    /// Extends the listpack with the contents of the given iterator.
+    ///
+    /// Returns `Ok(())` on success, or `Err(())` if the listpack is full.
+    #[inline(always)]
+    pub fn extend_back<I>(&mut self, iter: I) -> Result<(), ()>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        for item in iter {
+            self.push_back(item.as_ref());
+        }
+        Ok(())
+    }
+
+    /// Extends the listpack with the contents of the given iterator.
+    ///
+    /// Returns `Ok(())` on success, or `Err(())` if the listpack is full.
+    #[inline(always)]
+    pub fn extend_front<I>(&mut self, iter: I) -> Result<(), ()>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        for item in iter {
+            self.push_front(item.as_ref());
+        }
+        Ok(())
+    }
+
     /// Ensures there is enough space to insert `extra` bytes by growing
     /// and re-centering the internal buffer if necessary.
     /// bytes.
@@ -418,12 +492,18 @@ impl Listpack {
         let used = self.tail - self.head;
         let need = used + extra + 1;
 
+        // Увеличиваем размер только если действительно необходимо
         if self.head >= extra && self.data.len() - self.tail > extra {
             return;
         }
 
-        let new_cap = (self.len().max(1) * 3 / 2).max(need * 2);
-        let mut new_data = vec![0; new_cap];
+        // Более агрессивный рост для больших списков
+        let growth_factor = if self.len() > 1000 { 2 } else { 3 };
+        let new_cap = (self.len().max(1) * growth_factor).max(need * 2);
+
+        // Предварительное выделение с ёмкостью, чтобы избежать лишних перекопирований
+        let mut new_data = Vec::with_capacity(new_cap);
+        new_data.resize(new_cap, 0);
 
         let new_head = (new_cap - used) / 2;
         new_data[new_head..new_head + used].copy_from_slice(&self.data[self.head..self.tail]);
@@ -461,6 +541,7 @@ impl<'a> Iterator for ListpackIter<'a> {
 }
 
 impl<'a> ExactSizeIterator for ListpackIter<'a> {}
+
 impl<'a> DoubleEndedIterator for ListpackIter<'a> {
     #[inline(always)]
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -498,6 +579,48 @@ mod tests {
 
         assert!(lp.is_empty());
         assert_eq!(lp.len(), 0);
+    }
+
+    #[test]
+    fn test_with_capacity_zero() {
+        let lp = Listpack::with_capacity(0);
+
+        assert!(lp.data.len() >= 2); // должно быть минимум 2 байта
+        assert_eq!(lp.num_entries, 0);
+        assert_eq!(lp.tail, lp.head + 1);
+        assert_eq!(lp.data[lp.head], LP_EOF);
+    }
+
+    #[test]
+    fn test_with_capacity_small() {
+        let cap = 8;
+        let lp = Listpack::with_capacity(cap);
+
+        assert_eq!(lp.data.len(), cap);
+        assert_eq!(lp.num_entries, 0);
+        assert_eq!(lp.tail, lp.head + 1);
+        assert_eq!(lp.data[lp.head], LP_EOF);
+    }
+
+    #[test]
+    fn test_with_capacity_large() {
+        let cap = 1024;
+        let lp = Listpack::with_capacity(cap);
+
+        assert_eq!(lp.data.len(), cap);
+        assert_eq!(lp.num_entries, 0);
+        assert_eq!(lp.tail, lp.head + 1);
+        assert_eq!(lp.data[lp.head], LP_EOF);
+    }
+
+    #[test]
+    fn test_with_capacity_centering() {
+        let cap = 100;
+        let lp = Listpack::with_capacity(cap);
+
+        assert_eq!(lp.head, cap / 2);
+        assert_eq!(lp.tail, cap / 2 + 1);
+        assert_eq!(lp.data[lp.head], LP_EOF);
     }
 
     /// Tests push_back and get for correct ordering and retrieval.
@@ -577,7 +700,7 @@ mod tests {
     fn test_varint_encoding_decoding() {
         let values = [0, 1, 127, 128, 255, 16384, usize::MAX >> 1];
         for &v in &values {
-            let encoded = Listpack::encode_variant(v);
+            let encoded = Listpack::encode_varint(v);
             let (decoded, consumed) = Listpack::decode_varint(&encoded).unwrap();
 
             assert_eq!(decoded, v);
@@ -785,5 +908,57 @@ mod tests {
         // too long replacement denied
         assert!(!lp.replace(0, b"toolong"));
         assert_eq!(lp.get(0), Some(&b"foo"[..]));
+    }
+
+    #[test]
+    fn test_extend_back() {
+        let mut lp = Listpack::new();
+
+        // Добавляем несколько элементов в конец.
+        let elems = vec!["one", "two", "three"];
+        let result = lp.extend_back(elems.iter());
+
+        assert!(result.is_ok());
+
+        // Проверяем, что количество элементов соответствует.
+        assert_eq!(lp.len(), 3);
+
+        // Проверяем порядок элементов.
+        assert_eq!(lp.get(0), Some(b"one".as_ref()));
+        assert_eq!(lp.get(1), Some(b"two".as_ref()));
+        assert_eq!(lp.get(2), Some(b"three".as_ref()));
+
+        // Добавляем пустой итератор - ничего не меняется.
+        let empty: Vec<&str> = vec![];
+        let result = lp.extend_back(empty.iter());
+
+        assert!(result.is_ok());
+        assert_eq!(lp.len(), 3);
+    }
+
+    #[test]
+    fn test_extend_front() {
+        let mut lp = Listpack::new();
+
+        // Добавляем несколько элементов в начало.
+        let elems = vec!["one", "two", "three"];
+        let result = lp.extend_front(elems.iter());
+
+        assert!(result.is_ok());
+
+        // Проверяем, что количество элементов соответствует.
+        assert_eq!(lp.len(), 3);
+
+        // Поскольку добавляем в начало, порядок обратный.
+        assert_eq!(lp.get(0), Some(b"three".as_ref()));
+        assert_eq!(lp.get(1), Some(b"two".as_ref()));
+        assert_eq!(lp.get(2), Some(b"one".as_ref()));
+
+        // Добавляем пустой итератор - ничего не меняется.
+        let empty: Vec<&str> = vec![];
+        let result = lp.extend_front(empty.iter());
+
+        assert!(result.is_ok());
+        assert_eq!(lp.len(), 3);
     }
 }
