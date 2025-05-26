@@ -2,36 +2,39 @@
 //! format.
 //!
 //! This module implements the specification found at:
-//! <https://github.com/MiCkEyZzZ/listpack>
+//! <https://github.com/MiCkEyZzZ>
 //!
 //! Internally, it stores a sequence of byte strings in a single
 //! contiguous buffer using variable-length integer (varint)
 //! encoding for lengths and a special terminator byte.
 
-use std::result::Result;
+/// Integer encoding tags (first byte indicates width).
+const LP_ENCODING_INT8: u8 = 0x01;
+const LP_ENCODING_INT16: u8 = 0x02;
+const LP_ENCODING_INT24: u8 = 0x03;
+const LP_ENCODING_INT32: u8 = 0x04;
+const LP_ENCODING_INT64: u8 = 0x05;
 
 /// Terminator byte indicating the end of the list data.
 const LP_EOF: u8 = 0xFF;
-
 /// Mask for the lower 7 bits of a varint byte (payload).
 const VARINT_VALUE_MASK: u8 = 0x7F;
-
 /// Continuation flag in the highest bit of a varint byte.
 const VARINT_CONT_MASK: u8 = 0x80;
-
 /// Maximum value that fits in a single varint byte without
 /// continuation.
 const VARINT_VALUE_MAX: usize = VARINT_VALUE_MASK as usize;
-
 /// Threshold at which a varint must use an additional byte.
 const VARINT_CONT_THRESHOLD: usize = VARINT_VALUE_MAX + 1;
 
-/// A memory-efficient list of byte strings using custom
-/// varint-based serialization.
+/// A memory-efficient list of byte strings using varint-based serialization.
 ///
-/// The underlying storage is a `Vec<u8>` centered around a
-/// terminator byte. Each entry is stored as a varint-encoded
-/// length followed by the raw bytes.
+/// # Implementation Details
+///
+/// The underlying storage uses a single contiguous Vec<u8> buffer with:
+/// - A terminator byte (0xFF) to mark the end of data
+/// - Variable-length integer encoding for element lengths
+/// - Dynamic buffer growth and recentering
 pub struct Listpack {
     data: Vec<u8>,
     head: usize,
@@ -39,7 +42,10 @@ pub struct Listpack {
     num_entries: usize,
 }
 
-/// Iterator over a `Listpack`
+/// Iterator over Listpack elements
+///
+/// Provides forward iteration over the elements in the listpack.
+/// Implements DoubleEndedIterator for reverse iteration.
 pub struct ListpackIter<'a> {
     data: &'a [u8],
     pos: usize,
@@ -47,10 +53,9 @@ pub struct ListpackIter<'a> {
 }
 
 impl Listpack {
-    /// Creates a new empty `Listpack` with a preallocated buffer.
+    /// Creates a new empty Listpack with default initial capacity.
     ///
-    /// The internal buffer of size 1024 is centered with the
-    /// terminator byte placed at the midpoint.
+    /// The internal buffer is initialized with a centered terminator byte.
     pub fn new() -> Self {
         let cap = 1024;
         let mut data = vec![0; cap];
@@ -64,34 +69,16 @@ impl Listpack {
         }
     }
 
-    /// Creates a new `Listpack` with a preallocated buffer of the given capacity.
-    ///
-    /// The internal buffer is centered with the terminator byte placed at the midpoint.
+    /// Inserts an element at the front of the list.
     ///
     /// # Arguments
     ///
-    /// * `capacity` - The initial capacity of the internal buffer.
-    pub fn with_capacity(capacity: usize) -> Self {
-        let capacity = capacity.max(2); // минимум 2 байта, чтобы был хотя бы EOF
-        let mut data = Vec::with_capacity(capacity);
-        data.resize(capacity, 0);
-        let head = capacity / 2;
-        data[head] = LP_EOF;
-        Self {
-            data,
-            head,
-            tail: head + 1,
-            num_entries: 0,
-        }
-    }
-
-    /// Inserts a value at the front of the list.
+    /// * value - The byte slice to insert
     ///
-    /// Returns `true` on success.
+    /// # Returns
     ///
-    /// # Arguments
-    ///
-    /// * `value` - A byte slice to insert at the front.
+    /// Returns Ok(()) if the insertion was successful, or an error if
+    /// the operation failed (e.g., due to capacity constraints).
     #[inline(always)]
     pub fn push_front(&mut self, value: &[u8]) -> bool {
         let mut len_buf = [0u8; 10];
@@ -124,11 +111,11 @@ impl Listpack {
 
     /// Inserts a value at the back of the list.
     ///
-    /// Returns `true` on success.
+    /// Returns true on success.
     ///
     /// # Arguments
     ///
-    /// * `value` - A byte slice to append.
+    /// * value - A byte slice to append.
     #[inline(always)]
     pub fn push_back(&mut self, value: &[u8]) -> bool {
         let mut len_buf = [0u8; 10];
@@ -160,6 +147,98 @@ impl Listpack {
         self.num_entries += 1;
 
         true
+    }
+
+    /// Push an integer, choosing the smallest encoding automatically.
+    pub fn push_integer(&mut self, value: i64) -> bool {
+        let encoded = match value {
+            // Для 8-битных чисел
+            v if v >= i8::MIN as i64 && v <= i8::MAX as i64 => {
+                let mut buf = vec![LP_ENCODING_INT8];
+                buf.push(v as u8);
+                buf
+            }
+            // Для 16-битных чисел
+            v if v >= i16::MIN as i64 && v <= i16::MAX as i64 => {
+                let mut buf = vec![LP_ENCODING_INT16];
+                buf.extend_from_slice(&(v as i16).to_le_bytes());
+                buf
+            }
+            // Для 24-битных чисел
+            v if v >= -(1 << 23) && v <= (1 << 23) - 1 => {
+                let mut buf = vec![LP_ENCODING_INT24];
+                let bytes = v.to_le_bytes();
+                buf.extend_from_slice(&bytes[0..3]);
+                buf
+            }
+            // Для 32-битных чисел
+            v if v >= i32::MIN as i64 && v <= i32::MAX as i64 => {
+                let mut buf = vec![LP_ENCODING_INT32];
+                buf.extend_from_slice(&(v as i32).to_le_bytes());
+                buf
+            }
+            // Для 64-битных чисел
+            _ => {
+                let mut buf = vec![LP_ENCODING_INT64];
+                buf.extend_from_slice(&value.to_le_bytes());
+                buf
+            }
+        };
+
+        self.push_back(&encoded)
+    }
+
+    /// Decode an integer entry from its encoded bytes.
+    pub fn decode_integer(&self, data: &[u8]) -> Option<i64> {
+        if data.is_empty() {
+            return None;
+        }
+
+        match data[0] {
+            LP_ENCODING_INT8 => {
+                if data.len() < 2 {
+                    return None;
+                }
+                Some(data[1] as i8 as i64)
+            }
+            LP_ENCODING_INT16 => {
+                if data.len() < 3 {
+                    return None;
+                }
+                let mut bytes = [0u8; 2];
+                bytes.copy_from_slice(&data[1..3]);
+                Some(i16::from_le_bytes(bytes) as i64)
+            }
+            LP_ENCODING_INT24 => {
+                if data.len() < 4 {
+                    return None;
+                }
+                let mut bytes = [0u8; 4];
+                bytes[0..3].copy_from_slice(&data[1..4]);
+                // Правильная обработка знака для 24-битного числа
+                if bytes[2] & 0x80 != 0 {
+                    bytes[3] = 0xFF;
+                }
+                Some(i32::from_le_bytes(bytes) as i64)
+            }
+            LP_ENCODING_INT32 => {
+                if data.len() < 5 {
+                    return None;
+                }
+                let mut bytes = [0u8; 4];
+                bytes.copy_from_slice(&data[1..5]);
+                Some(i32::from_le_bytes(bytes) as i64)
+            }
+            LP_ENCODING_INT64 => {
+                if data.len() < 9 {
+                    return None;
+                }
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&data[1..9]);
+                Some(i64::from_le_bytes(bytes))
+            }
+            _ => None,
+        }
     }
 
     /// Remove and returns the first element, or `None` if empty.
@@ -241,11 +320,6 @@ impl Listpack {
         self.num_entries = 0;
     }
 
-    /// Returns the current capacity of the internal buffer.
-    pub fn capacity(&self) -> usize {
-        self.data.len()
-    }
-
     /// Returns a reference to the first element, or `None` if empty.
     #[must_use]
     pub fn front(&self) -> Option<&[u8]> {
@@ -260,71 +334,6 @@ impl Listpack {
         } else {
             self.get(self.num_entries - 1)
         }
-    }
-
-    /// Ensures capacity for at least `additional` more bytes
-    /// without realloc.
-    #[inline(always)]
-    pub fn reserve(&mut self, additional: usize) {
-        let need = (10 + additional) + (self.tail - self.head) + 1;
-
-        if need > self.data.len() {
-            self.grow_and_center(need - (self.tail - self.head));
-        }
-    }
-
-    /// Replaces the element at `index` with `value`, if lengths
-    /// allow.
-    ///
-    /// Returns `true` on success, `false` if `value.len()` > old_len.
-    #[inline(always)]
-    pub fn replace(&mut self, index: usize, value: &[u8]) -> bool {
-        if index >= self.num_entries {
-            return false;
-        }
-
-        let mut pos = self.head;
-        let mut curr = 0;
-
-        while pos < self.tail {
-            if self.data[pos] == LP_EOF {
-                break;
-            }
-
-            let (old_len, old_header) = match Self::decode_varint(&self.data[pos..]) {
-                Some(x) => x,
-                None => return false,
-            };
-
-            if curr == index {
-                let new_header_bytes = Self::encode_varint(value.len());
-
-                if new_header_bytes.len() != old_header || value.len() > old_len {
-                    return false;
-                }
-
-                self.data[pos..pos + old_header].copy_from_slice(&new_header_bytes);
-                let data_start = pos + old_header;
-
-                self.data[data_start..data_start + value.len()].copy_from_slice(value);
-
-                let src = data_start + old_len;
-                let dst = data_start + value.len();
-                self.data.copy_within(src..self.tail, dst);
-                self.tail -= old_len - value.len();
-
-                if self.tail > 0 {
-                    self.data[self.tail - 1] = LP_EOF;
-                }
-
-                return true;
-            }
-
-            pos += old_header + old_len;
-            curr += 1;
-        }
-
-        false
     }
 
     /// Retrieves a reference to the element at the specified index,
@@ -454,36 +463,6 @@ impl Listpack {
         None
     }
 
-    /// Extends the listpack with the contents of the given iterator.
-    ///
-    /// Returns `Ok(())` on success, or `Err(())` if the listpack is full.
-    #[inline(always)]
-    pub fn extend_back<I>(&mut self, iter: I) -> Result<(), ()>
-    where
-        I: IntoIterator,
-        I::Item: AsRef<[u8]>,
-    {
-        for item in iter {
-            self.push_back(item.as_ref());
-        }
-        Ok(())
-    }
-
-    /// Extends the listpack with the contents of the given iterator.
-    ///
-    /// Returns `Ok(())` on success, or `Err(())` if the listpack is full.
-    #[inline(always)]
-    pub fn extend_front<I>(&mut self, iter: I) -> Result<(), ()>
-    where
-        I: IntoIterator,
-        I::Item: AsRef<[u8]>,
-    {
-        for item in iter {
-            self.push_front(item.as_ref());
-        }
-        Ok(())
-    }
-
     /// Ensures there is enough space to insert `extra` bytes by growing
     /// and re-centering the internal buffer if necessary.
     /// bytes.
@@ -579,48 +558,6 @@ mod tests {
 
         assert!(lp.is_empty());
         assert_eq!(lp.len(), 0);
-    }
-
-    #[test]
-    fn test_with_capacity_zero() {
-        let lp = Listpack::with_capacity(0);
-
-        assert!(lp.data.len() >= 2); // должно быть минимум 2 байта
-        assert_eq!(lp.num_entries, 0);
-        assert_eq!(lp.tail, lp.head + 1);
-        assert_eq!(lp.data[lp.head], LP_EOF);
-    }
-
-    #[test]
-    fn test_with_capacity_small() {
-        let cap = 8;
-        let lp = Listpack::with_capacity(cap);
-
-        assert_eq!(lp.data.len(), cap);
-        assert_eq!(lp.num_entries, 0);
-        assert_eq!(lp.tail, lp.head + 1);
-        assert_eq!(lp.data[lp.head], LP_EOF);
-    }
-
-    #[test]
-    fn test_with_capacity_large() {
-        let cap = 1024;
-        let lp = Listpack::with_capacity(cap);
-
-        assert_eq!(lp.data.len(), cap);
-        assert_eq!(lp.num_entries, 0);
-        assert_eq!(lp.tail, lp.head + 1);
-        assert_eq!(lp.data[lp.head], LP_EOF);
-    }
-
-    #[test]
-    fn test_with_capacity_centering() {
-        let cap = 100;
-        let lp = Listpack::with_capacity(cap);
-
-        assert_eq!(lp.head, cap / 2);
-        assert_eq!(lp.tail, cap / 2 + 1);
-        assert_eq!(lp.data[lp.head], LP_EOF);
     }
 
     /// Tests push_back and get for correct ordering and retrieval.
@@ -857,6 +794,7 @@ mod tests {
         assert_eq!(lp.get(9_999), Some(format!("B4999").as_bytes()));
     }
 
+    /// Tests pop operations from both ends of the list
     #[test]
     fn test_pop_front_and_pop_back() {
         let mut lp = Listpack::new();
@@ -875,90 +813,97 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_and_reserve() {
+    fn test_push_and_decode_integer() {
         let mut lp = Listpack::new();
 
-        for &v in &[b"x", b"y", b"z"] {
-            lp.push_back(v);
+        // Тестовые значения для разных размеров
+        let values = [
+            0i64,           // 8 бит
+            1i64,           // 8 бит
+            -1i64,          // 8 бит
+            127i64,         // 8 бит
+            -128i64,        // 8 бит
+            32767i64,       // 16 бит
+            -32768i64,      // 16 бит
+            8388607i64,     // 24 бит
+            -8388608i64,    // 24 бит
+            2147483647i64,  // 32 бит
+            -2147483648i64, // 32 бит
+            i64::MAX,       // 64 бит
+            i64::MIN,       // 64 бит
+        ];
+
+        // Сначала добавляем все значения
+        for &v in &values {
+            assert!(lp.push_integer(v), "failed to push {}", v);
         }
 
-        lp.clear();
-        assert!(lp.is_empty());
-        // reserve should not panic and should allocate enough
-        lp.reserve(5000);
+        // Затем проверяем их
+        for (i, &expected) in values.iter().enumerate() {
+            let data = lp.get(i).unwrap();
+            let decoded = lp.decode_integer(data).unwrap();
+            assert_eq!(decoded, expected, "failed at idx {}", i);
+        }
+    }
 
-        for _ in 0..5000 {
-            lp.push_back(b"v");
+    #[test]
+    fn test_integer_edge_cases() {
+        let mut lp = Listpack::new();
+
+        // Граничные значения для каждого типа кодирования
+        let edge_cases = [
+            i8::MIN as i64,
+            i8::MAX as i64,
+            i16::MIN as i64,
+            i16::MAX as i64,
+            -(1 << 23),
+            (1 << 23) - 1,
+            i32::MIN as i64,
+            i32::MAX as i64,
+            i64::MIN,
+            i64::MAX,
+        ];
+
+        // Сначала добавляем все значения
+        for &v in &edge_cases {
+            assert!(lp.push_integer(v), "failed to push {}", v);
         }
 
-        assert_eq!(lp.len(), 5000);
+        // Затем проверяем их
+        for (i, &expected) in edge_cases.iter().enumerate() {
+            let data = lp.get(i).unwrap();
+            let decoded = lp.decode_integer(data).unwrap();
+            assert_eq!(decoded, expected, "failed for value {}", expected);
+        }
     }
 
     #[test]
-    fn test_replace() {
+    fn test_mixed_push_and_pop_integer_and_string() {
         let mut lp = Listpack::new();
 
-        lp.push_back(b"foo");
-        lp.push_back(b"barbaz");
+        // Добавляем элементы
+        assert!(lp.push_integer(42));
+        assert!(lp.push_back(b"hello"));
+        assert!(lp.push_integer(-123));
+        assert!(lp.push_back(b"world"));
 
-        // narrower replacement allowed
-        assert!(lp.replace(1, b"hi"));
-        assert_eq!(lp.get(1), Some(&b"hi"[..]));
+        // Проверяем значения
+        assert_eq!(lp.decode_integer(lp.get(0).unwrap()).unwrap(), 42);
+        assert_eq!(lp.get(1).unwrap(), b"hello");
+        assert_eq!(lp.decode_integer(lp.get(2).unwrap()).unwrap(), -123);
+        assert_eq!(lp.get(3).unwrap(), b"world");
 
-        // too long replacement denied
-        assert!(!lp.replace(0, b"toolong"));
-        assert_eq!(lp.get(0), Some(&b"foo"[..]));
-    }
+        // Проверяем pop операции
+        let last = lp.pop_back().unwrap();
+        assert_eq!(last, b"world");
 
-    #[test]
-    fn test_extend_back() {
-        let mut lp = Listpack::new();
+        let third = lp.pop_back().unwrap();
+        assert_eq!(lp.decode_integer(&third).unwrap(), -123);
 
-        // Добавляем несколько элементов в конец.
-        let elems = vec!["one", "two", "three"];
-        let result = lp.extend_back(elems.iter());
+        let second = lp.pop_back().unwrap();
+        assert_eq!(second, b"hello");
 
-        assert!(result.is_ok());
-
-        // Проверяем, что количество элементов соответствует.
-        assert_eq!(lp.len(), 3);
-
-        // Проверяем порядок элементов.
-        assert_eq!(lp.get(0), Some(b"one".as_ref()));
-        assert_eq!(lp.get(1), Some(b"two".as_ref()));
-        assert_eq!(lp.get(2), Some(b"three".as_ref()));
-
-        // Добавляем пустой итератор - ничего не меняется.
-        let empty: Vec<&str> = vec![];
-        let result = lp.extend_back(empty.iter());
-
-        assert!(result.is_ok());
-        assert_eq!(lp.len(), 3);
-    }
-
-    #[test]
-    fn test_extend_front() {
-        let mut lp = Listpack::new();
-
-        // Добавляем несколько элементов в начало.
-        let elems = vec!["one", "two", "three"];
-        let result = lp.extend_front(elems.iter());
-
-        assert!(result.is_ok());
-
-        // Проверяем, что количество элементов соответствует.
-        assert_eq!(lp.len(), 3);
-
-        // Поскольку добавляем в начало, порядок обратный.
-        assert_eq!(lp.get(0), Some(b"three".as_ref()));
-        assert_eq!(lp.get(1), Some(b"two".as_ref()));
-        assert_eq!(lp.get(2), Some(b"one".as_ref()));
-
-        // Добавляем пустой итератор - ничего не меняется.
-        let empty: Vec<&str> = vec![];
-        let result = lp.extend_front(empty.iter());
-
-        assert!(result.is_ok());
-        assert_eq!(lp.len(), 3);
+        let first = lp.pop_back().unwrap();
+        assert_eq!(lp.decode_integer(&first).unwrap(), 42);
     }
 }
