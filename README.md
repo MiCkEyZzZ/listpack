@@ -1,4 +1,4 @@
-# listpack
+# Listpack
 
 In-memory Listpack implementation for the Zumic.
 

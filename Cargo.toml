@@ -1,14 +1,15 @@
 [package]
 name = "listpack"
-version = "1.3.0"
-authors = ["Mikhail<mikhail.f.zhuravlev@gmail.com>"]
+version = "1.4.0"
+authors = ["Mikhail <mikhail.f.zhuravlev@gmail.com>"]
 edition = "2021"
 license = "MIT"
-description = "A compact, memory-efficient serialization format for lists of byte strings using varint-encoded lengths"
+description = "Компактный формат сериализации списков байтовых строк с varint-кодированием длин"
 repository = "https://github.com/MiCkEyZzZ/listpack"
 homepage = "https://github.com/MiCkEyZzZ/listpack#readme"
 readme = "README.md"
 categories = ["data-serialization", "data-structures"]
+keywords = ["serialization", "list", "compact", "varint", "no-std"]
 publish = false
 
 [lib]
